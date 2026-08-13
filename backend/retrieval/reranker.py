@@ -65,29 +65,33 @@ class Reranker:
         """
         Helper method to compute similarity reranking using embedding models.
         """
+        np = import_numpy()
+
         if not self.embedding_model:
             # Absolute fallback if no embedding model is passed: keep original scores
+            reranked = []
             for item in candidates:
                 item_copy = item.copy()
                 item_copy["rerank_score"] = item.get("score", 0.0)
-            return candidates
-            
+                reranked.append(item_copy)  # was missing — items were built but never collected
+            return reranked
+
         # Get query embedding
         query_emb = self.embedding_model.embed_queries([query])[0]
-        query_norm = query_emb / (import_numpy().linalg.norm(query_emb) or 1.0)
-        
+        query_norm = query_emb / (np.linalg.norm(query_emb) or 1.0)
+
         # Get chunk embeddings (from cache/Qdrant payloads if saved, or recomputed)
         texts = [item["payload"]["text"] for item in candidates]
         doc_embs = self.embedding_model.embed_documents(texts)
-        
+
         reranked = []
         for item, doc_emb in zip(candidates, doc_embs):
             item_copy = item.copy()
-            doc_norm = doc_emb / (import_numpy().linalg.norm(doc_emb) or 1.0)
-            score = float(import_numpy().dot(query_norm, doc_norm))
+            doc_norm = doc_emb / (np.linalg.norm(doc_emb) or 1.0)
+            score = float(np.dot(query_norm, doc_norm))
             item_copy["rerank_score"] = score
             reranked.append(item_copy)
-            
+
         return reranked
 
 def import_numpy():

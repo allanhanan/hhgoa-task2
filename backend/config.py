@@ -73,16 +73,17 @@ REDIS_URL = os.getenv("REDIS_URL")
 CACHE_PATH = DATA_DIR / "cache.json"
 
 # Qdrant client configurations
-QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_PATH = DATA_DIR / "indexes" / "v1" / "qdrant_db"
+QDRANT_PATH = None  # None tells QdrantClient to use URL rather than local path
 
 # BM25 Index Path
 BM25_PATH = DATA_DIR / "indexes" / "v1" / "bm25_index.pkl"
 
 # API Keys
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 # Guardrail thresholds
 RELEVANCE_THRESHOLD = 0.35  # Min score for relevant context

@@ -1,3 +1,4 @@
+import re
 import logging
 import requests
 import json
@@ -10,16 +11,17 @@ logger.setLevel(logging.INFO)
 
 class LLMGenerator:
     """
-    Handles LLM invocations using Gemini API.
-    If GEMINI_API_KEY is not configured, runs in mock mode using
+    Handles LLM invocations using Groq OpenAI-compatible Chat Completions API.
+    If GROQ_API_KEY is not configured, runs in mock mode using
     deterministic context matching.
     """
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or config.GEMINI_API_KEY
-        self.endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+        self.api_key = api_key or config.GROQ_API_KEY
+        self.model = model or config.GROQ_MODEL
+        self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
         
         if not self.api_key:
-            logger.warning("No GEMINI_API_KEY found. Generator running in MOCK grounded matching mode.")
+            logger.warning("No GROQ_API_KEY found. Generator running in MOCK grounded matching mode.")
 
     def generate_answer(self, query: str, retrieved_chunks: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
         """
@@ -51,30 +53,29 @@ class LLMGenerator:
         system_instruction = GROUNDED_QA_SYSTEM_PROMPT.format(context_text=context_text)
         user_content = GROUNDED_QA_USER_PROMPT.format(query=query)
 
-        # 3. Call Gemini REST API
-        headers = {"Content-Type": "application/json"}
-        url = f"{self.endpoint}?key={self.api_key}"
+        # 3. Call Groq REST API (OpenAI Chat Completions format)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
         
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{system_instruction}\n\n{user_content}"}]
-                }
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content}
             ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 500
-            }
+            "temperature": 0.0,
+            "max_tokens": 500
         }
 
         try:
-            logger.info("Submitting generateContent request to Gemini API...")
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            logger.info(f"Submitting chat completion request to Groq API ({self.model})...")
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=15)
             if response.status_code == 200:
                 data = response.json()
-                answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                logger.info(f"Gemini API generation successful: '{answer[:100]}...'")
+                answer = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"Groq API generation successful: '{answer[:100]}...'")
                 
                 # Extract citation numbers like [1], [2] from text
                 citations = []
@@ -88,50 +89,47 @@ class LLMGenerator:
                 
                 return answer, citations
             else:
-                logger.error(f"Gemini API request failed ({response.status_code}): {response.text}")
+                logger.error(f"Groq API request failed ({response.status_code}): {response.text}")
                 return self._mock_generate(query, retrieved_chunks)
         except Exception as e:
-            logger.error(f"Gemini connection error: {e}. Falling back to mock generator.")
+            logger.error(f"Groq connection error: {e}. Falling back to mock generator.")
             return self._mock_generate(query, retrieved_chunks)
 
     def verify_grounding_via_llm(self, answer: str, context_text: str) -> Tuple[str, str]:
         """
-        Runs LLM-as-a-judge grounding validation.
+        Runs LLM-as-a-judge grounding validation using Groq.
         Returns: (verdict: "grounded" / "not_grounded", reason: str)
         """
         if not self.api_key:
             # Simple heuristic in mock mode
             ans_words = set(re.findall(r"\w+", answer.lower()))
             ctx_words = set(re.findall(r"\w+", context_text.lower()))
-            # If word overlap ratio of answer in context is high, mark grounded
             overlap = len(ans_words.intersection(ctx_words)) / len(ans_words) if ans_words else 1.0
             if overlap >= 0.7:
-                return "grounded", f"Mock check: {overlap:.2f} word overlap overlap ratio."
+                return "grounded", f"Mock check: {overlap:.2f} word overlap ratio."
             else:
                 return "not_grounded", f"Mock check: Low word overlap ratio ({overlap:.2f})."
 
         prompt = GROUNDING_JUDGE_SYSTEM_PROMPT.format(context_text=context_text, generated_answer=answer)
-        headers = {"Content-Type": "application/json"}
-        url = f"{self.endpoint}?key={self.api_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}]
-                }
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
             ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 300
-            }
+            "temperature": 0.0,
+            "max_tokens": 300
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=10)
             if response.status_code == 200:
-                text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                text = response.json()["choices"][0]["message"]["content"].strip()
                 
-                # Parse verdict and reason from Gemini output
+                # Parse verdict and reason from output
                 verdict = "grounded"
                 reason = "Grounded according to LLM auditor."
                 
@@ -173,5 +171,3 @@ class LLMGenerator:
             return f"{first_sentence} [1]", [chunk_id]
             
         return "NOT_SUPPORTED", []
-
-import re

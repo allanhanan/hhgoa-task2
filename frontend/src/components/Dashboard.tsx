@@ -80,7 +80,9 @@ interface CumulativeMetrics {
   grounding_passes: number;
   grounding_rate: number;
   latency_p50_ms: number;
+  latency_p70_ms: number;
   latency_p95_ms: number;
+  latency_p100_ms: number;
 }
 
 export default function Dashboard() {
@@ -326,8 +328,8 @@ export default function Dashboard() {
           </div>
           <div style={{ width: '1px', background: '#334155' }} />
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-            <span style={{ color: '#64748b' }}>LLM Reader</span>
-            <span style={{ fontWeight: 600 }}>Gemini 1.5 Flash</span>
+            <span style={{ color: '#64748b' }}>LLM Router</span>
+            <span style={{ fontWeight: 600 }}>Groq (Adaptive Model Router)</span>
           </div>
           <div style={{ width: '1px', background: '#334155' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -363,9 +365,9 @@ export default function Dashboard() {
         <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
           <Clock style={{ color: '#a855f7' }} size={24} />
           <div>
-            <div style={{ fontSize: '12px', color: '#94a3b8' }}>P50 / P95 Latency</div>
-            <div style={{ fontSize: '20px', fontWeight: 700 }}>
-              {(metrics?.latency_p50_ms ?? 0).toFixed(0)} / {(metrics?.latency_p95_ms ?? 0).toFixed(0)} ms
+            <div style={{ fontSize: '12px', color: '#94a3b8' }}>P50 / P70 / P100 Latency</div>
+            <div style={{ fontSize: '16px', fontWeight: 700 }}>
+              {(metrics?.latency_p50_ms ?? 0).toFixed(0)} / {(metrics?.latency_p70_ms ?? 0).toFixed(0)} / {(metrics?.latency_p100_ms ?? 0).toFixed(0)} ms
             </div>
           </div>
         </div>
@@ -453,7 +455,7 @@ export default function Dashboard() {
                       {isRecording ? `Recording Audio (${recordTime}s)` : 'Speech-To-Text Input'}
                     </div>
                     <div style={{ fontSize: '11px', color: '#64748b' }}>
-                      {isRecording ? 'Press again to stop and submit' : 'Supports Sarvam AI STT API'}
+                      {isRecording ? 'Press again to stop and submit' : 'Supports ElevenLabs Scribe v1 STT API'}
                     </div>
                   </div>
                 </div>
@@ -538,7 +540,7 @@ export default function Dashboard() {
                 { name: 'Sparse Search (BM25 Index)', key: 'sparse_ms' },
                 { name: 'RRF Hybrid Rank Fusion', key: 'fusion_ms' },
                 { name: 'Cross-Encoder Similarity Reranker', key: 'reranking_ms' },
-                { name: 'Grounded LLM Reader (Gemini)', key: 'generation_ms' },
+                { name: 'Grounded LLM Reader (Groq)', key: 'generation_ms' },
                 { name: 'Multi-Signal Grounding Check', key: 'grounding_ms' }
               ].map((step) => {
                 const latency = response?.latency[step.key as keyof Latency];

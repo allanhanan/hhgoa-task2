@@ -235,6 +235,12 @@ def run_ingestion(
                     doc_chunks = chunk_semantically(cleaned_text, doc_id, lang_short, embedder.embed_documents, config.SEMANTIC_THRESHOLD, config.MAX_CHUNK_CHARACTERS)
                 elif strategy == "hierarchical":
                     doc_chunks = chunk_hierarchical(cleaned_text, doc_id, lang_short)
+                elif strategy == "vast":
+                    # Vast multi-strategy indexing: combines sentence, semantic, and hierarchical chunks
+                    c_sent = chunk_by_sentence(cleaned_text, doc_id, lang_short, config.CHUNK_SIZE_SENTENCES, config.CHUNK_OVERLAP_SENTENCES, config.MAX_CHUNK_CHARACTERS)
+                    c_sem = chunk_semantically(cleaned_text, doc_id, lang_short, embedder.embed_documents, config.SEMANTIC_THRESHOLD, config.MAX_CHUNK_CHARACTERS)
+                    c_hier = chunk_hierarchical(cleaned_text, doc_id, lang_short)
+                    doc_chunks = c_sent + c_sem + c_hier
                     
                 for c in doc_chunks:
                     c["metadata"]["source_query"] = item.get("query", "")
@@ -345,7 +351,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ingest MSMARCO-XI dataset and build indices.")
     parser.add_argument("--limit", type=int, default=config.INGESTION_LIMIT, help="Number of documents to process.")
-    parser.add_argument("--strategy", type=str, default=config.CHUNK_STRATEGY, choices=["sentence", "semantic", "hierarchical"], help="Chunking strategy.")
+    parser.add_argument("--strategy", type=str, default=config.CHUNK_STRATEGY, choices=["sentence", "semantic", "hierarchical", "vast"], help="Chunking strategy.")
     parser.add_argument("--langs", nargs="+", default=["hi", "ta"], help="Languages to ingest.")
     parser.add_argument("--split", type=str, default="validation", choices=["train", "validation"], help="Dataset split to pull from.")
     

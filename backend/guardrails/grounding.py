@@ -1,4 +1,5 @@
 import logging
+import inspect
 import re
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
@@ -24,14 +25,14 @@ class GroundingChecker:
     1. Retrieval Relevance Score (Best reranker/fusion score of input chunks).
     2. Context-Answer Semantic Similarity (Via embedding cosine similarity).
     3. Citation/Text Intersection Overlap (N-gram verification).
-    4. Optional LLM Judge validation.
+    4. Async LLM Judge validation.
     """
     def __init__(self, embedding_model = None, relevance_threshold: float = 0.35, grounding_threshold: float = 0.70):
         self.embedding_model = embedding_model
         self.relevance_threshold = relevance_threshold
         self.grounding_threshold = grounding_threshold
 
-    def verify_grounding(
+    async def verify_grounding(
         self,
         query: str,
         answer: str,
@@ -46,13 +47,12 @@ class GroundingChecker:
             return False, 0.0, {"reason": "No retrieved context chunks available."}
 
         # Check for refusal responses
-        refusal_phrases = ["not_supported", "i don't know", "i cannot find", "insufficient evidence", "not supported"]
+        refusal_phrases = ["not_supported", "i don't know", "i cannot find", "insufficient evidence", "not supported", "blocked_by_safety"]
         answer_lower = answer.lower()
         if any(phrase in answer_lower for phrase in refusal_phrases) or len(answer.strip()) < 5:
             return True, 1.0, {"reason": "System output is a safe refusal or empty response."}
 
         # Signal 1: Retrieval Relevance
-        # Calculate maximum rerank/similarity score
         max_relevance = max([chunk.get("rerank_score", chunk.get("score", 0.0)) for chunk in retrieved_chunks])
         relevance_pass = max_relevance >= self.relevance_threshold
 
@@ -71,17 +71,20 @@ class GroundingChecker:
                 semantic_sim = float(np.dot(ans_norm, ctx_norm))
             except Exception as e:
                 logger.error(f"Semantic similarity check error: {e}")
-                semantic_sim = 0.5  # Fallback neutral score
+                semantic_sim = 0.5
 
         # Signal 3: Token/Word Intersection
         intersection_score = calculate_word_intersection(answer, context_text)
 
-        # Signal 4: Optional LLM Judge
+        # Signal 4: LLM Judge Validation
         llm_verdict = 1.0
         llm_reason = "Skipped"
         if llm_judge_fn and relevance_pass:
             try:
-                verdict_str, reason = llm_judge_fn(answer, context_text)
+                if inspect.iscoroutinefunction(llm_judge_fn):
+                    verdict_str, reason = await llm_judge_fn(answer, context_text)
+                else:
+                    verdict_str, reason = llm_judge_fn(answer, context_text)
                 llm_reason = reason
                 if "not_grounded" in verdict_str.lower() or "hallucination" in verdict_str.lower():
                     llm_verdict = 0.0
@@ -91,13 +94,11 @@ class GroundingChecker:
                     llm_verdict = 0.5
             except Exception as e:
                 logger.error(f"LLM Judge validation failed: {e}")
-                llm_verdict = 1.0  # Fallback to skip/pass
+                llm_verdict = 1.0
 
         # Compute Overall Grounding Score (Weighted Average)
-        # Weights: semantic_sim (0.4) + intersection_score (0.3) + llm_verdict (0.3)
         overall_score = (semantic_sim * 0.4) + (intersection_score * 0.3) + (llm_verdict * 0.3)
         
-        # Soft validation combining metrics
         is_grounded = True
         reason = "Grounded"
 
