@@ -5,7 +5,7 @@ from typing import Tuple
 logger = logging.getLogger("RAG.guardrails.safety")
 logger.setLevel(logging.INFO)
 
-# List of common jailbreak/prompt injection indicators
+# Expanded prompt injection & jailbreak patterns (multilingual English + Indic transliteration)
 PROMPT_INJECTION_PATTERNS = [
     r"ignore\s+(?:all\s+)?previous\s+instructions",
     r"you\s+are\s+now\s+a\s+dan",
@@ -16,9 +16,13 @@ PROMPT_INJECTION_PATTERNS = [
     r"translate\s+the\s+system\s+instruction",
     r"acting\s+as\s+a\s+developer",
     r"ignore\s+above\s+and\s+do",
+    r"repeat\s+the\s+system\s+prompt",
+    r"reveal\s+your\s+instructions",
+    r"पुरानी\s+हिदायतें\s+भूल\s+जाओ", # Hindi: forget old instructions
+    r"सिस्टम\s+प्रॉम्प्ट\s+दिखाओ" # Hindi: show system prompt
 ]
 
-# Off-topic patterns (e.g., explicit hacking requests, malware creation)
+# Off-topic / malicious intent patterns
 OFF_TOPIC_PATTERNS = [
     r"hack\s+someone",
     r"write\s+(?:a\s+)?malware",
@@ -27,19 +31,21 @@ OFF_TOPIC_PATTERNS = [
     r"steal\s+credentials",
     r"sql\s+injection\s+exploit",
     r"crack\s+password",
+    r"keylogger",
+    r"ransomware"
 ]
 
 def check_query_safety(query: str) -> Tuple[bool, str]:
     """
-    Evaluates safety of input queries.
+    Evaluates safety & guardrails of input queries.
     Returns: (is_safe, safety_status)
     """
-    if not query:
+    if not query or len(query.strip()) < 2:
         return True, "SAFE"
 
-    query_lower = query.lower()
+    query_lower = query.lower().strip()
 
-    # 1. Check for prompt injection
+    # 1. Check for prompt injection / jailbreak
     for pattern in PROMPT_INJECTION_PATTERNS:
         if re.search(pattern, query_lower):
             logger.warning(f"Safety violation: PROMPT_INJECTION matched '{pattern}'")

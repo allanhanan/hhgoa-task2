@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 
 # Inject parent directory into path to support running directly from inside backend/ folder
@@ -9,24 +10,26 @@ if parent_dir not in sys.path:
 import time
 import uuid
 import logging
+import asyncio
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
 
 from backend import config
 from backend.embeddings.model import EmbeddingModel
 from backend.retrieval.dense import QdrantRepository
 from backend.retrieval.sparse import BM25SparseRetriever
-from backend.retrieval.hybrid import reciprocal_rank_fusion
 from backend.retrieval.reranker import Reranker
-from backend.speech.sarvam import SarvamSTTClient
-from backend.generation.llm import LLMGenerator
-from backend.cache.cache_adapter import get_cache_adapter
-from backend.guardrails.safety import check_query_safety
+from backend.speech.elevenlabs import ElevenLabsSTTClient, ElevenLabsTTSClient
+from backend.generation.providers import GroqLLMProvider, MockLLMProvider
+from backend.generation.router import AdaptiveModelRouter
+from backend.cache.semantic_cache import SemanticLSHCache
 from backend.guardrails.grounding import GroundingChecker
 from backend.observability.metrics import MetricsTracker
+from backend.harness import PipelineHarness, PipelineResult
+from backend.pipeline import AsyncRAGPipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +37,8 @@ logger = logging.getLogger("RAG.api")
 
 app = FastAPI(
     title="Multilingual Production RAG Service",
-    description="Indic-focused voice/text retrieval and question-answering pipeline with multi-signal guardrails.",
-    version="1.0.0"
+    description="Indic-focused voice/text retrieval and question-answering pipeline with sub-200ms retrieval and real-time audio streaming.",
+    version="2.1.0"
 )
 
 # Enable CORS for frontend interface
@@ -47,285 +50,187 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pipeline instances (initialized on startup)
-components = {}
+# Global Container for Dependency Injection
+container = {}
 
 class QueryRequest(BaseModel):
     query: str = Field(..., example="भारत की राजधानी क्या है?")
     language: str = Field("hi", example="hi")
+    latency_sensitive: bool = Field(False, example=False)
 
 @app.on_event("startup")
-def startup_event():
-    logger.info("Initializing RAG pipeline components...")
-    
-    # 1. Initialize Embedder
+async def startup_event():
+    logger.info("Initializing RAG pipeline with Dependency Injection Container...")
+
+    # 1. Embedder
     embedder = EmbeddingModel(
         mode=config.EMBEDDING_MODE,
         model_name=config.EMBEDDING_MODEL_NAME,
         dim=config.EMBEDDING_DIM
     )
-    components["embedder"] = embedder
-    
-    # 2. Initialize Qdrant Persistent Repository
-    qdrant_repo = QdrantRepository(
+    container["embedder"] = embedder
+
+    # 2. Dense Retriever
+    dense_retriever = QdrantRepository(
         path=str(config.QDRANT_PATH),
         url=config.QDRANT_URL,
         api_key=config.QDRANT_API_KEY,
         vector_dim=config.EMBEDDING_DIM
     )
-    components["dense_retriever"] = qdrant_repo
-    
-    # 3. Initialize BM25 Sparse Retriever
+    container["dense_retriever"] = dense_retriever
+
+    # 3. Sparse Retriever
     sparse_retriever = BM25SparseRetriever()
     sparse_retriever.load(str(config.BM25_PATH))
-    components["sparse_retriever"] = sparse_retriever
-    
-    # 4. Initialize Reranker
+    container["sparse_retriever"] = sparse_retriever
+
+    # 4. Reranker
     reranker = Reranker(
         cross_encoder_model_name=config.CROSS_ENCODER_MODEL_NAME if config.RERANKER_TYPE == "cross_encoder" else None,
         embedding_model=embedder
     )
-    components["reranker"] = reranker
+    container["reranker"] = reranker
+
+    # 5. LLM Providers & Router (Dependency Injection)
+    groq_provider = GroqLLMProvider(api_key=config.GROQ_API_KEY, default_model=config.GROQ_MODEL)
+    mock_provider = MockLLMProvider()
     
-    # 5. Initialize Generator
-    components["generator"] = LLMGenerator(api_key=config.GEMINI_API_KEY)
+    providers = {
+        "groq": groq_provider,
+        "mock": mock_provider
+    }
     
-    # 6. Initialize Grounding Checker
-    components["grounding_checker"] = GroundingChecker(
+    router = AdaptiveModelRouter(
+        providers=providers,
+        default_provider_name="groq" if config.GROQ_API_KEY else "mock",
+        fast_model=os.getenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant"),
+        quality_model=os.getenv("GROQ_QUALITY_MODEL", config.GROQ_MODEL)
+    )
+    container["router"] = router
+
+    # 6. Pipeline Harness
+    harness = PipelineHarness(
+        router=router,
+        embedder=embedder,
+        dense_retriever=dense_retriever,
+        sparse_retriever=sparse_retriever,
+        max_retries=2
+    )
+    container["harness"] = harness
+
+    # 7. Grounding Checker
+    grounding_checker = GroundingChecker(
         embedding_model=embedder,
         relevance_threshold=config.RELEVANCE_THRESHOLD,
         grounding_threshold=config.GROUNDING_THRESHOLD
     )
-    
-    # 7. Initialize Sarvam STT
-    components["stt"] = SarvamSTTClient(api_key=config.SARVAM_API_KEY)
-    
-    # 8. Initialize Cache
-    components["cache"] = get_cache_adapter(
-        backend=config.CACHE_BACKEND,
-        redis_url=config.REDIS_URL,
-        file_path=str(config.CACHE_PATH)
+    container["grounding_checker"] = grounding_checker
+
+    # 8. Speech Clients (STT & TTS)
+    stt_client = ElevenLabsSTTClient(api_key=config.ELEVENLABS_API_KEY)
+    tts_client = ElevenLabsTTSClient(api_key=config.ELEVENLABS_API_KEY)
+    container["stt"] = stt_client
+    container["tts"] = tts_client
+
+    # 9. Semantic LSH Cache (~2ms match)
+    semantic_cache = SemanticLSHCache(file_path=str(config.CACHE_PATH), max_hamming_distance=3)
+    container["semantic_cache"] = semantic_cache
+
+    # 10. Metrics Tracker
+    metrics_tracker = MetricsTracker()
+    container["metrics"] = metrics_tracker
+
+    # 11. Async Orchestrated Pipeline with Audio Streaming
+    pipeline = AsyncRAGPipeline(
+        harness=harness,
+        embedder=embedder,
+        reranker=reranker,
+        grounding_checker=grounding_checker,
+        semantic_cache=semantic_cache,
+        metrics_tracker=metrics_tracker,
+        stt_client=stt_client,
+        tts_client=tts_client
     )
-    
-    # 9. Initialize Metrics Tracker
-    components["metrics"] = MetricsTracker()
-    
-    logger.info("RAG pipeline initialization complete.")
+    container["pipeline"] = pipeline
+
+    logger.info("Async RAG Pipeline with Real-time Audio Streaming initialized.")
 
 @app.get("/api/v1/health")
-def health_check():
+async def health_check():
     return {
         "status": "healthy",
         "environment": config.ENVIRONMENT,
         "embedding_mode": config.EMBEDDING_MODE,
         "reranker_type": config.RERANKER_TYPE,
-        "cache_backend": config.CACHE_BACKEND,
+        "router_models": {
+            "fast": os.getenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant"),
+            "quality": config.GROQ_MODEL
+        },
         "timestamp": time.time()
     }
 
 @app.get("/api/v1/metrics")
-def get_metrics():
-    tracker: MetricsTracker = components.get("metrics")
+async def get_metrics():
+    tracker: MetricsTracker = container.get("metrics")
     if tracker:
         return tracker.get_report()
     return {"error": "Metrics tracker not available."}
 
 @app.post("/api/v1/text/query")
-def process_text_query(req: QueryRequest):
-    request_id = f"req_{uuid.uuid4().hex[:8]}"
-    query = req.query.strip()
-    language = req.language.strip()
-    
-    logger.info(f"[{request_id}] Received text query: '{query}' ({language})")
-    
-    # 1. Safety check (Jailbreak / Prompt Injection check)
-    is_safe, safety_status = check_query_safety(query)
-    if not is_safe:
-        logger.warning(f"[{request_id}] Query blocked by safety guardrail: {safety_status}")
-        return {
-            "request_id": request_id,
-            "query": query,
-            "answer": "blocked_by_safety",
-            "grounded": False,
-            "status": safety_status,
-            "latency_ms": 0
-        }
-
-    # 2. Check Cache
-    cache = components["cache"]
-    cache_key = f"rag_cache:{language}:{query}"
-    cached_val = cache.get(cache_key)
-    if cached_val:
-        logger.info(f"[{request_id}] Cache hit! Returning cached response.")
-        response = json.loads(cached_val)
-        response["request_id"] = request_id
-        response["cached"] = True
-        return response
-
-    # 3. Execute Pipeline with detailed latency tracking
-    metrics: MetricsTracker = components["metrics"]
-    latencies = {}
-    
-    t_start = time.time()
-
-    # Query embedding
-    t_emb_0 = time.time()
-    embedder = components["embedder"]
+async def process_text_query(req: QueryRequest):
+    pipeline: AsyncRAGPipeline = container["pipeline"]
     try:
-        query_vector = embedder.embed_queries([query])[0]
+        result = await pipeline.process_text_query(
+            query=req.query, 
+            language=req.language, 
+            latency_sensitive=req.latency_sensitive
+        )
+        return result.dict()
     except Exception as e:
-        logger.error(f"[{request_id}] Embedding generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Embedding generation failed.")
-    latencies["embedding_ms"] = (time.time() - t_emb_0) * 1000
-
-    # Dense Search
-    t_dense_0 = time.time()
-    dense_ret = components["dense_retriever"]
-    dense_res = dense_ret.search(query_vector, limit=config.DENSE_TOP_K, language=language)
-    latencies["dense_ms"] = (time.time() - t_dense_0) * 1000
-
-    # Sparse Search (BM25)
-    t_sparse_0 = time.time()
-    sparse_ret = components["sparse_retriever"]
-    sparse_res = sparse_ret.search(query, limit=config.SPARSE_TOP_K, language=language)
-    latencies["sparse_ms"] = (time.time() - t_sparse_0) * 1000
-
-    # Hybrid Fusion (RRF)
-    t_fusion_0 = time.time()
-    fused_res = reciprocal_rank_fusion(dense_res, sparse_res, k=config.RRF_CONSTANT, limit=config.FUSED_TOP_K)
-    latencies["fusion_ms"] = (time.time() - t_fusion_0) * 1000
-
-    # Reranking
-    t_rerank_0 = time.time()
-    reranker = components["reranker"]
-    reranked_res = reranker.rerank(query, fused_res, limit=config.FINAL_TOP_K)
-    latencies["reranking_ms"] = (time.time() - t_rerank_0) * 1000
-
-    # Relevance guardrail check
-    max_relevance = max([c.get("rerank_score", 0.0) for c in reranked_res]) if reranked_res else 0.0
-    effective_threshold = 0.0 if config.EMBEDDING_MODE == "mock" else config.RELEVANCE_THRESHOLD
-    if max_relevance < effective_threshold:
-        logger.info(f"[{request_id}] Low relevance ({max_relevance:.2f}). Refusing query.")
-
-        total_time = (time.time() - t_start) * 1000
-        latencies["total_ms"] = total_time
-        response = {
-            "request_id": request_id,
-            "query": query,
-            "answer": "NOT_SUPPORTED",
-            "sources": [],
-            "language": language,
-            "grounded": True,
-            "confidence": 1.0,
-            "status": "OUT_OF_SCOPE",
-            "latency": latencies,
-            "pipeline_steps": {
-                "dense_candidates": len(dense_res),
-                "sparse_candidates": len(sparse_res),
-                "fused_candidates": len(fused_res),
-                "reranked_candidates": 0
-            }
-        }
-        # Log out-of-scope metric
-        metrics.log_request(total_time, is_grounded=True, cache_hit=False)
-        return response
-
-    # Grounded Generation
-    t_gen_0 = time.time()
-    generator = components["generator"]
-    answer, cited_chunk_ids = generator.generate_answer(query, reranked_res)
-    latencies["generation_ms"] = (time.time() - t_gen_0) * 1000
-
-    # Grounding Checker
-    t_ground_0 = time.time()
-    checker = components["grounding_checker"]
-    is_grounded, grounding_score, grounding_details = checker.verify_grounding(
-        query=query,
-        answer=answer,
-        retrieved_chunks=reranked_res,
-        llm_judge_fn=generator.verify_grounding_via_llm
-    )
-    latencies["grounding_ms"] = (time.time() - t_ground_0) * 1000
-
-    # Final latency compute
-    total_time = (time.time() - t_start) * 1000
-    latencies["total_ms"] = total_time
-
-    # Build response sources with proper chunk metadata mappings
-    sources = []
-    for c in reranked_res:
-        sources.append({
-            "chunk_id": c.get("chunk_id", ""),
-            "text": c["payload"]["text"],
-            "score": c.get("rerank_score", c.get("score", 0.0)),
-            "metadata": c["payload"].get("metadata", {})
-        })
-
-    response = {
-        "request_id": request_id,
-        "query": query,
-        "answer": answer if is_grounded else "NOT_SUPPORTED",
-        "sources": sources,
-        "language": language,
-        "grounded": is_grounded,
-        "confidence": grounding_score,
-        "status": "SUCCESS" if is_grounded else "GROUNDING_VIOLATION",
-        "latency": latencies,
-        "pipeline_steps": {
-            "dense_candidates": len(dense_res),
-            "sparse_candidates": len(sparse_res),
-            "fused_candidates": len(fused_res),
-            "reranked_candidates": len(reranked_res)
-        },
-        "grounding_details": grounding_details
-    }
-
-    # Save to Cache
-    try:
-        cache.set(cache_key, json.dumps(response), ttl=3600)
-    except Exception as e:
-        logger.error(f"[{request_id}] Cache set failure: {e}")
-
-    # Track metrics
-    metrics.log_request(total_time, is_grounded=is_grounded, cache_hit=False)
-
-    return response
+        logger.error(f"Error processing text query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/voice/query")
 async def process_voice_query(
     file: UploadFile = File(...),
     language: str = Form("hi")
 ):
-    request_id = f"req_{uuid.uuid4().hex[:8]}"
-    logger.info(f"[{request_id}] Received voice query in '{language}'")
-    
-    t_start = time.time()
-    
-    # Read audio bytes
-    audio_bytes = await file.read()
-    
-    # 1. Voice transcription (Sarvam STT)
-    t_stt_0 = time.time()
-    stt_client = components["stt"]
-    transcription = stt_client.transcribe(audio_bytes, language)
-    stt_latency = (time.time() - t_stt_0) * 1000
-    
-    if not transcription:
-        raise HTTPException(status_code=400, detail="Voice transcription failed or returned empty text.")
+    pipeline: AsyncRAGPipeline = container["pipeline"]
+    try:
+        audio_bytes = await file.read()
+        result = await pipeline.process_voice_query(audio_bytes=audio_bytes, language=language)
+        return result.dict()
+    except Exception as e:
+        logger.error(f"Error processing voice query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # 2. Forward transcription to text query pipeline
-    # We invoke process_text_query directly to preserve latency metrics and trace query execution flow
-    req = QueryRequest(query=transcription, language=language)
-    response = process_text_query(req)
-    
-    # 3. Add voice specific keys to payload response
-    response["transcription"] = transcription
-    
-    # Record STT latency in breakdown
-    response["latency"]["stt_ms"] = stt_latency
-    response["latency"]["total_ms"] += stt_latency
-    
-    return response
+@app.post("/api/v1/text/stream")
+async def stream_text_audio(req: QueryRequest):
+    """
+    Streams audio/mpeg synthesized spoken answer in real-time from text query.
+    Pipes LLM tokens into ElevenLabs TTS Stream.
+    """
+    pipeline: AsyncRAGPipeline = container["pipeline"]
+    return StreamingResponse(
+        pipeline.process_text_audio_stream(query=req.query, language=req.language),
+        media_type="audio/mpeg"
+    )
+
+@app.post("/api/v1/voice/stream")
+async def stream_voice_audio(
+    file: UploadFile = File(...),
+    language: str = Form("hi")
+):
+    """
+    Streams audio/mpeg synthesized spoken answer in real-time from voice input upload.
+    Pipeline: Voice STT -> Vector Retrieval -> LLM Stream -> ElevenLabs TTS Stream.
+    """
+    pipeline: AsyncRAGPipeline = container["pipeline"]
+    audio_bytes = await file.read()
+    return StreamingResponse(
+        pipeline.process_voice_audio_stream(audio_bytes=audio_bytes, language=language),
+        media_type="audio/mpeg"
+    )
 
 if __name__ == "__main__":
     import uvicorn
