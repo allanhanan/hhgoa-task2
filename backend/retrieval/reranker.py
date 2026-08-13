@@ -21,11 +21,15 @@ class Reranker:
             try:
                 logger.info(f"Attempting to load Cross-Encoder: {cross_encoder_model_name}...")
                 from sentence_transformers import CrossEncoder
-                self.cross_encoder = CrossEncoder(cross_encoder_model_name)
+                try:
+                    self.cross_encoder = CrossEncoder(cross_encoder_model_name, local_files_only=True)
+                except Exception:
+                    self.cross_encoder = CrossEncoder(cross_encoder_model_name, local_files_only=False)
                 self.is_cross_encoder_active = True
                 logger.info("Cross-Encoder loaded successfully.")
             except Exception as e:
                 logger.warning(f"Could not load Cross-Encoder ({e}). Falling back to embedding-based similarity reranking.")
+
 
     def rerank(self, query: str, candidates: List[Dict[str, Any]], limit: int = 3) -> List[Dict[str, Any]]:
         """

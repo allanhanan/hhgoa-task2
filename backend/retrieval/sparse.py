@@ -85,6 +85,16 @@ class BM25SparseRetriever(SparseRetriever):
             logger.error(f"Error building BM25 index: {e}. Falling back to mock.")
             self.is_mock = True
 
+    def add_chunks_batch(self, batch_chunks: List[Dict[str, Any]]):
+        """
+        Appends a batch of chunks and updates the BM25 index over accumulated chunks.
+        """
+        if not batch_chunks:
+            return
+        self.chunks.extend(batch_chunks)
+        self.build_index(self.chunks)
+
+
     def save(self, file_path: str):
         """
         Serializes the index and chunks list to a file.

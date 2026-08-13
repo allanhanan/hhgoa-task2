@@ -3,7 +3,7 @@ import json
 import uuid
 import logging
 import asyncio
-from typing import Dict, Any, Optional, List, Tuple, AsyncGenerator
+from typing import Dict, Any, Optional, List, Tuple, AsyncGenerator, AsyncIterator
 
 from backend import config
 from backend.harness import PipelineHarness, PipelineResult, SourceCitation, DetailedLatency
@@ -221,6 +221,186 @@ class AsyncRAGPipeline:
 
         self.metrics_tracker.log_request(total_time, is_grounded=is_grounded, cache_hit=False)
         return result
+
+    async def process_text_query_sse(
+        self,
+        query: str,
+        language: str = "hi",
+        latency_sensitive: bool = False
+    ) -> AsyncIterator[str]:
+        """
+        Yields Server-Sent Events (SSE) for real-time pipeline tracing and token streaming.
+        Event format: "data: <json>\n\n"
+        Event types:
+          - {type: "stage", stage: "embedding", latency_ms: X}
+          - {type: "stage", stage: "retrieval", latency_ms: X, ...}
+          - {type: "token", text: "..."}
+          - {type: "done", latency: {...}, status: "...", grounded: bool, confidence: float, sources: [...]}
+          - {type: "error", message: "..."}
+        """
+        def sse(data: dict) -> str:
+            return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        request_id = f"req_{uuid.uuid4().hex[:8]}"
+        query = query.strip()
+        language = language.strip()
+        t_start = time.time()
+        latencies = DetailedLatency()
+
+        # 1. Safety Check
+        is_safe, safety_status = check_query_safety(query)
+        if not is_safe:
+            yield sse({"type": "done", "status": safety_status, "answer": "blocked_by_safety",
+                       "grounded": False, "confidence": 0.0, "sources": [],
+                       "latency": {"total_ms": (time.time() - t_start) * 1000},
+                       "pipeline_steps": {}})
+            return
+
+        # 2. Embedding
+        t_emb = time.time()
+        try:
+            query_vector = await asyncio.to_thread(self.embedder.embed_queries, [query])
+            query_vec = query_vector[0]
+        except Exception as e:
+            logger.error(f"[{request_id}] Embedding failed: {e}")
+            query_vec = None
+        latencies.embedding_ms = (time.time() - t_emb) * 1000
+        yield sse({"type": "stage", "stage": "embedding", "latency_ms": round(latencies.embedding_ms, 2)})
+
+        # 3. Semantic Cache Check
+        if query_vec is not None:
+            cached_match = self.semantic_cache.find_semantic_match(query_vec, language=language)
+            if cached_match:
+                cached_json, sim_score = cached_match
+                try:
+                    res_dict = json.loads(cached_json)
+                    total_t = (time.time() - t_start) * 1000
+                    res_dict["request_id"] = request_id
+                    res_dict["cached"] = True
+                    res_dict["latency"]["total_ms"] = total_t
+                    self.metrics_tracker.log_request(total_t, is_grounded=True, cache_hit=True)
+                    yield sse({"type": "cache_hit", "latency_ms": round(total_t, 2)})
+                    # Emit the cached answer as token for streaming effect
+                    cached_answer = res_dict.get("answer", "")
+                    yield sse({"type": "token", "text": cached_answer})
+                    yield sse({"type": "done", **res_dict})
+                    return
+                except Exception as e:
+                    logger.error(f"Cache parse error: {e}")
+
+        # 4. Retrieval
+        t_ret = time.time()
+        dense_res, sparse_res, t_dense, t_sparse = await self.harness.execute_retrieval_with_fallbacks(
+            query=query, query_vector=query_vec, language=language,
+            dense_top_k=config.DENSE_TOP_K, sparse_top_k=config.SPARSE_TOP_K
+        )
+        latencies.dense_ms = t_dense
+        latencies.sparse_ms = t_sparse
+        yield sse({"type": "stage", "stage": "dense_retrieval", "latency_ms": round(t_dense, 2), "candidates": len(dense_res)})
+        yield sse({"type": "stage", "stage": "sparse_retrieval", "latency_ms": round(t_sparse, 2), "candidates": len(sparse_res)})
+
+        # 5. Fusion + Reranking
+        t_fuse = time.time()
+        fused_res = reciprocal_rank_fusion(dense_res, sparse_res, k=config.RRF_CONSTANT, limit=config.FUSED_TOP_K)
+        latencies.fusion_ms = (time.time() - t_fuse) * 1000
+        yield sse({"type": "stage", "stage": "fusion", "latency_ms": round(latencies.fusion_ms, 2), "candidates": len(fused_res)})
+
+        t_rerank = time.time()
+        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K)
+        latencies.reranking_ms = (time.time() - t_rerank) * 1000
+        latencies.retrieval_total_ms = (time.time() - t_ret) * 1000
+        yield sse({"type": "stage", "stage": "reranking", "latency_ms": round(latencies.reranking_ms, 2), "candidates": len(reranked_res)})
+
+        # Relevance guardrail
+        max_relevance = max([c.get("rerank_score", 0.0) for c in reranked_res]) if reranked_res else 0.0
+        effective_threshold = 0.0 if config.EMBEDDING_MODE == "mock" else config.RELEVANCE_THRESHOLD
+        if max_relevance < effective_threshold:
+            total_time = (time.time() - t_start) * 1000
+            latencies.total_ms = total_time
+            self.metrics_tracker.log_request(total_time, is_grounded=True, cache_hit=False)
+            yield sse({"type": "done", "status": "OUT_OF_SCOPE", "answer": "NOT_SUPPORTED",
+                       "grounded": True, "confidence": 1.0, "sources": [],
+                       "latency": latencies.__dict__,
+                       "pipeline_steps": {"dense_candidates": len(dense_res), "sparse_candidates": len(sparse_res),
+                                          "fused_candidates": len(fused_res), "reranked_candidates": 0}})
+            return
+
+        # 6. LLM Streaming Generation (token-by-token)
+        yield sse({"type": "stage", "stage": "generation_start", "latency_ms": 0})
+        t_gen = time.time()
+        provider, model_name = self.harness.router.select_model(query, language, latency_sensitive=latency_sensitive)
+        full_answer = ""
+        try:
+            token_stream = provider.generate_answer_stream(query, reranked_res, model_name=model_name)
+            async for token in token_stream:
+                full_answer += token
+                yield sse({"type": "token", "text": token})
+        except Exception as e:
+            logger.error(f"[{request_id}] Streaming generation error: {e}")
+            full_answer = "NOT_SUPPORTED"
+        latencies.generation_ms = (time.time() - t_gen) * 1000
+        yield sse({"type": "stage", "stage": "generation", "latency_ms": round(latencies.generation_ms, 2)})
+
+        # 7. Grounding
+        t_ground = time.time()
+        async def judge_fn(ans, ctx):
+            return await provider.verify_grounding(ans, ctx, model_name=model_name)
+        is_grounded, grounding_score, grounding_details = await self.grounding_checker.verify_grounding(
+            query=query, answer=full_answer, retrieved_chunks=reranked_res, llm_judge_fn=judge_fn
+        )
+        latencies.grounding_ms = (time.time() - t_ground) * 1000
+        yield sse({"type": "stage", "stage": "grounding", "latency_ms": round(latencies.grounding_ms, 2),
+                   "grounded": is_grounded, "confidence": round(grounding_score, 3)})
+
+        total_time = (time.time() - t_start) * 1000
+        latencies.total_ms = total_time
+
+        sources = [
+            SourceCitation(
+                chunk_id=c.get("chunk_id", f"chunk_{i}"),
+                text=c["payload"]["text"],
+                score=c.get("rerank_score", c.get("score", 0.0)),
+                metadata=c["payload"].get("metadata", {})
+            ).dict()
+            for i, c in enumerate(reranked_res)
+        ]
+
+        final_answer = full_answer if is_grounded else "NOT_SUPPORTED"
+        self.metrics_tracker.log_request(total_time, is_grounded=is_grounded, cache_hit=False)
+
+        # Cache if grounded
+        if is_grounded and query_vec is not None and final_answer != "NOT_SUPPORTED":
+            try:
+                result = PipelineResult(
+                    request_id=request_id, query=query, answer=final_answer, sources=[
+                        SourceCitation(**s) for s in sources
+                    ], language=language, grounded=is_grounded, confidence=grounding_score,
+                    status="SUCCESS", cached=False, latency=latencies,
+                    pipeline_steps={"dense_candidates": len(dense_res), "sparse_candidates": len(sparse_res),
+                                    "fused_candidates": len(fused_res), "reranked_candidates": len(reranked_res)},
+                    grounding_details=grounding_details
+                )
+                self.semantic_cache.set_semantic(query, query_vec, language, result.json(), ttl=3600)
+            except Exception as e:
+                logger.error(f"Cache write error: {e}")
+
+        yield sse({
+            "type": "done",
+            "request_id": request_id,
+            "status": "SUCCESS" if is_grounded else "GROUNDING_VIOLATION",
+            "answer": final_answer,
+            "grounded": is_grounded,
+            "confidence": round(grounding_score, 3),
+            "sources": sources,
+            "latency": latencies.__dict__,
+            "pipeline_steps": {
+                "dense_candidates": len(dense_res),
+                "sparse_candidates": len(sparse_res),
+                "fused_candidates": len(fused_res),
+                "reranked_candidates": len(reranked_res)
+            },
+            "grounding_details": grounding_details
+        })
 
     async def process_voice_query(self, audio_bytes: bytes, language: str = "hi") -> PipelineResult:
         t_stt_0 = time.time()

@@ -1,8 +1,11 @@
 import time
 import logging
+import os
 import asyncio
 from typing import List
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from backend import config
 from backend.interfaces import IEmbeddingModel
 
 logger = logging.getLogger("RAG.embeddings")
@@ -25,10 +28,14 @@ class EmbeddingModel(IEmbeddingModel):
             return
 
         try:
-            logger.info(f"Loading embedding model in REAL mode: {self.model_name}...")
-            from sentence_transformers import SentenceTransformer
             start_time = time.time()
-            self.model = SentenceTransformer(self.model_name)
+            try:
+                # Load directly from local HuggingFace cache (instant startup, zero network requests)
+                self.model = SentenceTransformer(self.model_name, local_files_only=True)
+            except Exception:
+                # If model is not yet in local cache, download once
+                logger.info(f"Model not found in local cache. Downloading {self.model_name}...")
+                self.model = SentenceTransformer(self.model_name, local_files_only=False)
             logger.info(f"Loaded embedding model in {time.time() - start_time:.2f} seconds.")
         except Exception as e:
             logger.error(f"CRITICAL: Failed to load sentence-transformers model: {e}")
@@ -64,8 +71,10 @@ class EmbeddingModel(IEmbeddingModel):
             raise RuntimeError("Embedding model is not loaded.")
 
         try:
-            embeddings = self.model.encode(texts, show_progress_bar=False)
+            batch_size = getattr(config, "EMBEDDING_BATCH_SIZE", 32)
+            embeddings = self.model.encode(texts, batch_size=batch_size, show_progress_bar=False)
             return [np.array(e) for e in embeddings]
         except Exception as e:
             logger.error(f"Error encoding embeddings: {e}")
             raise RuntimeError(f"Failed to generate embeddings: {e}")
+

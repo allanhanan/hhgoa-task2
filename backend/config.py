@@ -34,8 +34,11 @@ DEFAULT_LANGUAGE = "hi"
 
 # Ingestion configuration
 # Configurable limit of records to pull for stage benchmarking:
-# Stage 1: 100-1000. Stage 2: 10k-100k. Stage 3: full dataset
-INGESTION_LIMIT = int(os.getenv("INGESTION_LIMIT", "1000")) 
+# 0 means unlimited / ingest full dataset
+INGEST_LIMIT = int(os.getenv("INGEST_LIMIT", os.getenv("INGESTION_LIMIT", "1000")))
+INGESTION_LIMIT = INGEST_LIMIT  # Alias for backward compatibility
+INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "32"))
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
 # Fallback parameter - NEVER set this to True for benchmarks or final submissions
 ALLOW_SYNTHETIC_FALLBACK = os.getenv("ALLOW_SYNTHETIC_FALLBACK", "false").lower() == "true"
@@ -73,9 +76,9 @@ REDIS_URL = os.getenv("REDIS_URL")
 CACHE_PATH = DATA_DIR / "cache.json"
 
 # Qdrant client configurations
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_PATH = None  # None tells QdrantClient to use URL rather than local path
+QDRANT_PATH = os.getenv("QDRANT_PATH", str(BASE_DIR / "qdrant_storage"))
 
 # BM25 Index Path
 BM25_PATH = DATA_DIR / "indexes" / "v1" / "bm25_index.pkl"
