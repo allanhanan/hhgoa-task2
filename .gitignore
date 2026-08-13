@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+**/__pycache__/
+**/*.py[cod]
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Node/npm (Frontend)
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor/OS directories and files
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Machine Learning / AI / Large Data / Indexes
+# Ignore downloaded model files and checkpoints
+models/
+*model*/
+*.bin
+*.pt
+*.onnx
+*.safetensors
+*.weights
+*.h5
+*.pb
+*.ckpt
+huggingface/
+.cache/
+
+# Ignore large datasets and indexes
+*.parquet
+data/hintrain.parquet
+data/indexes/
