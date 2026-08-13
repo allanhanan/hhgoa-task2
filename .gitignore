@@ -7,6 +7,8 @@ __pycache__/
 
 # Environments
 .env
+.env.local
+env
 .venv
 env/
 venv/
@@ -47,3 +49,7 @@ huggingface/
 *.parquet
 data/hintrain.parquet
 data/indexes/
+qdrant_storage/
+
+# Local handoff / generated bundles
+requested_rag_files_bundle.md
