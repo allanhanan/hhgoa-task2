@@ -116,6 +116,7 @@ class PipelineHarness:
         query: str, 
         query_vector: Any, 
         language: str,
+        strategy: Optional[str] = None,
         dense_top_k: int = 20,
         sparse_top_k: int = 20
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, float]:
@@ -129,9 +130,9 @@ class PipelineHarness:
                 if query_vector is None:
                     return [], 0.0
                 if inspect.iscoroutinefunction(self.dense_retriever.search):
-                    res = await self.dense_retriever.search(query_vector, limit=dense_top_k, language=language)
+                    res = await self.dense_retriever.search(query_vector, limit=dense_top_k, language=language, strategy=strategy)
                 else:
-                    res = await asyncio.to_thread(self.dense_retriever.search, query_vector, limit=dense_top_k, language=language)
+                    res = await asyncio.to_thread(self.dense_retriever.search, query_vector, limit=dense_top_k, language=language, strategy=strategy)
                 return res, (time.time() - t0) * 1000
             except Exception as e:
                 logger.error(f"Dense retrieval error ({e}). Using empty fallback.")
@@ -141,9 +142,9 @@ class PipelineHarness:
             t0 = time.time()
             try:
                 if inspect.iscoroutinefunction(self.sparse_retriever.search):
-                    res = await self.sparse_retriever.search(query, limit=sparse_top_k, language=language)
+                    res = await self.sparse_retriever.search(query, limit=sparse_top_k, language=language, strategy=strategy)
                 else:
-                    res = await asyncio.to_thread(self.sparse_retriever.search, query, limit=sparse_top_k, language=language)
+                    res = await asyncio.to_thread(self.sparse_retriever.search, query, limit=sparse_top_k, language=language, strategy=strategy)
                 return res, (time.time() - t0) * 1000
             except Exception as e:
                 logger.error(f"Sparse retrieval error ({e}). Using empty fallback.")

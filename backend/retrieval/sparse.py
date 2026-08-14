@@ -87,12 +87,12 @@ class BM25SparseRetriever(SparseRetriever):
 
     def add_chunks_batch(self, batch_chunks: List[Dict[str, Any]]):
         """
-        Appends a batch of chunks and updates the BM25 index over accumulated chunks.
+        Appends a batch of chunks. Note: build_index must be called separately 
+        after all batches are added to finalize the index.
         """
         if not batch_chunks:
             return
         self.chunks.extend(batch_chunks)
-        self.build_index(self.chunks)
 
 
     def save(self, file_path: str):

@@ -104,6 +104,7 @@ class AsyncRAGPipeline:
             query=query,
             query_vector=query_vec,
             language=language,
+            strategy=config.CHUNK_STRATEGY,
             dense_top_k=config.DENSE_TOP_K,
             sparse_top_k=config.SPARSE_TOP_K
         )
@@ -116,7 +117,7 @@ class AsyncRAGPipeline:
         latencies.fusion_ms = (time.time() - t_fusion_0) * 1000
 
         t_rerank_0 = time.time()
-        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K)
+        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K, query_vec)
         latencies.reranking_ms = (time.time() - t_rerank_0) * 1000
 
         # Measure Retrieval Sub-200ms Target Latency!
@@ -139,8 +140,8 @@ class AsyncRAGPipeline:
                 answer="NOT_SUPPORTED",
                 sources=[],
                 language=language,
-                grounded=True,
-                confidence=1.0,
+                grounded=False,
+                confidence=0.0,
                 status="OUT_OF_SCOPE",
                 cached=False,
                 latency=latencies,
@@ -292,6 +293,7 @@ class AsyncRAGPipeline:
         t_ret = time.time()
         dense_res, sparse_res, t_dense, t_sparse = await self.harness.execute_retrieval_with_fallbacks(
             query=query, query_vector=query_vec, language=language,
+            strategy=config.CHUNK_STRATEGY,
             dense_top_k=config.DENSE_TOP_K, sparse_top_k=config.SPARSE_TOP_K
         )
         latencies.dense_ms = t_dense
@@ -306,7 +308,7 @@ class AsyncRAGPipeline:
         yield sse({"type": "stage", "stage": "fusion", "latency_ms": round(latencies.fusion_ms, 2), "candidates": len(fused_res)})
 
         t_rerank = time.time()
-        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K)
+        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K, query_vec)
         latencies.reranking_ms = (time.time() - t_rerank) * 1000
         latencies.retrieval_total_ms = (time.time() - t_ret) * 1000
         yield sse({"type": "stage", "stage": "reranking", "latency_ms": round(latencies.reranking_ms, 2), "candidates": len(reranked_res)})
@@ -319,7 +321,7 @@ class AsyncRAGPipeline:
             latencies.total_ms = total_time
             self.metrics_tracker.log_request(total_time, is_grounded=True, cache_hit=False)
             yield sse({"type": "done", "status": "OUT_OF_SCOPE", "answer": "NOT_SUPPORTED",
-                       "grounded": True, "confidence": 1.0, "sources": [],
+                       "grounded": False, "confidence": 0.0, "sources": [],
                        "latency": latencies.__dict__,
                        "pipeline_steps": {"dense_candidates": len(dense_res), "sparse_candidates": len(sparse_res),
                                           "fused_candidates": len(fused_res), "reranked_candidates": 0}})
@@ -438,10 +440,11 @@ class AsyncRAGPipeline:
 
         dense_res, sparse_res, _, _ = await self.harness.execute_retrieval_with_fallbacks(
             query=query, query_vector=query_vec, language=language,
+            strategy=config.CHUNK_STRATEGY,
             dense_top_k=config.DENSE_TOP_K, sparse_top_k=config.SPARSE_TOP_K
         )
         fused_res = reciprocal_rank_fusion(dense_res, sparse_res, k=config.RRF_CONSTANT, limit=config.FUSED_TOP_K)
-        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K)
+        reranked_res = await asyncio.to_thread(self.reranker.rerank, query, fused_res, config.FINAL_TOP_K, query_vec)
 
         if not reranked_res:
             async for chunk in self.tts_client.stream_tts("Sufficient evidence was not found to answer your question.", voice_id=voice_id):

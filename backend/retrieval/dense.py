@@ -194,7 +194,9 @@ class QdrantRepository:
                     collection_name=self.collection_name,
                     query=query_vector.tolist(),
                     query_filter=query_filter,
-                    limit=limit
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=True
                 )
                 search_results = response.points
             else:
@@ -202,14 +204,17 @@ class QdrantRepository:
                     collection_name=self.collection_name,
                     query_vector=query_vector.tolist(),
                     query_filter=query_filter,
-                    limit=limit
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=True
                 )
             
             return [
                 {
                     "id": hit.id,
                     "score": hit.score,
-                    "payload": hit.payload
+                    "payload": hit.payload,
+                    "vector": hit.vector
                 }
                 for hit in search_results
             ]

@@ -159,7 +159,6 @@ def process_batch(
         vectors_upserted = len(embedded_chunks)
 
     sparse_retriever.add_chunks_batch(batch_chunks)
-    sparse_retriever.save(str(config.BM25_PATH))
     return vectors_upserted
 
 def run_ingestion(
@@ -388,6 +387,10 @@ def run_ingestion(
             batch_chunks.clear()
 
     total_duration = time.time() - start_time
+    logger.info("Building final BM25 index...")
+    sparse_retriever.build_index(sparse_retriever.chunks)
+    sparse_retriever.save(str(config.BM25_PATH))
+
     checkpoint_mgr.update(
         dataset=config.DATASET_NAME,
         split=split_name,
